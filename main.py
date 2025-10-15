@@ -3,6 +3,7 @@ import operator
 from dotenv import load_dotenv
 from typing import Annotated, List
 from pydantic import BaseModel, Field
+import fitz
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -12,7 +13,7 @@ from langgraph.graph import StateGraph, START, END
 
 # Import search function from validation.py
 from validation import search_comorbidities
-
+from report_loading import extract_text_from_pdf, chunk_text
 
 # ============================
 # Environment Setup
@@ -127,6 +128,20 @@ def assign_workers(state: State):
     return [Send("condition_extractor_worker", {"task": "Extract conditions", "patient_report": state["patient_report"]})]
 
 # ============================
+# PDF Extraction
+# ============================
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """
+    Extracts text from a 1-page PDF medical report.
+    Retruns a single string of text.
+    """
+    with fitz.open(pdf_path) as doc:
+        text = ""
+        for page in doc:
+            text += page.get_text("text") + "\n"
+    return text.strip()
+
+# ============================
 # Graph Assembly
 # ============================
 graph = StateGraph(State)
@@ -155,14 +170,29 @@ print("Workflow graph saved as workflow.png")
 # ============================
 # Example Run
 # ============================
-sample_report = """
-Mr Tan Ah Kow has a history of medical conditions. He has had hypertension and
-hyperlipidemia since 1990 and suffered several strokes in 2005. He subsequently
-developed heart problems (cardiomyopathy), cardiac failure and chronic renal disease
-and was treated in ABC Hospital.
-"""
+pdf_path = "Sample-filled-in-MR.pdf"
 
-state = comorbidity_pipeline.invoke({"patient_report": sample_report})
-final_text = "\n\n".join(state["final_report"]) if isinstance(state["final_report"], list) else state["final_report"]
+if os.path.exists(pdf_path):
+    print(f"Extracting text from {pdf_path}...")
+    patient_report_text = extract_text_from_pdf(pdf_path)
+else:
+    print(f"PDF not found at {pdf_path}.")
+
+chunks = chunk_text(patient_report_text)
+print(f"Extracted {len(chunks)} text chunk(s) from report.")
+
+final_reports = []
+for i, chunk in enumerate(chunks, 1):
+    print(f"\nProcessing chunk {i}/{len(chunks)}...")
+    state = comorbidity_pipeline.invoke({"patient_report": chunk})
+    final_text = (
+        "\n\n".join(state["final_report"]) 
+        if isinstance(state["final_report"], list) 
+        else state["final_report"]
+    )
+    final_reports.append(f'## Chunk {i}\n{final_text}')
+
+combined_report = "\n\n---\n\n".join(final_reports)
+
 print("\n========== FINAL REPORT ==========\n")
-print(final_text)
+print(combined_report[:3000] + ("\n\n...[truncated]" if len(combined_report) > 3000 else ""))
