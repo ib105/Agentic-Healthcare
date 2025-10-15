@@ -3,7 +3,6 @@ import operator
 from dotenv import load_dotenv
 from typing import Annotated, List
 from pydantic import BaseModel, Field
-import fitz
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -13,7 +12,7 @@ from langgraph.graph import StateGraph, START, END
 
 # Import search function from validation.py
 from validation import search_comorbidities
-from report_loading import extract_text_from_pdf, chunk_text
+from report_loading import extract_text_from_pdf, chunk_text, extract_text_from_image
 
 # ============================
 # Environment Setup
@@ -107,9 +106,9 @@ def comorbidity_worker(state: WorkerState):
         if not results:
             comorbidity_summary.append("- No related comorbidities found.")
         else:
-            for r in results:
+            for doc,distance in results:
                 comorbidity_summary.append(
-                    f"- {r.metadata.get('condition', 'Unknown')} (ICD-10: {r.metadata.get('icd10', 'N/A')})"
+                    f"- {doc.metadata.get('condition', 'Unknown')} (ICD-10: {doc.metadata.get('icd10', 'N/A')}, Distance: {distance:.4f})"
                 )
 
     return {"completed_sections": ["\n".join(comorbidity_summary)]}
@@ -156,28 +155,38 @@ print("Workflow graph saved as workflow.png")
 # ============================
 # Example Run
 # ============================
-pdf_path = "Sample-filled-in-MR.pdf"
+input_path = "Med-reports/Cardiologist-Viskin-Report-page-1.jpg"
 
-if os.path.exists(pdf_path):
-    print(f"Extracting text from {pdf_path}...")
-    patient_report_text = extract_text_from_pdf(pdf_path)
+# Detect file type
+ext = os.path.splitext(input_path)[-1].lower()
+
+if not os.path.exists(input_path):
+    print(f"File not found at {input_path}.")
+elif ext == ".pdf":
+    print(f"Extracting text from PDF: {input_path}")
+    full_text = extract_text_from_pdf(input_path)
+elif ext in [".jpg", ".jpeg", ".png"]:
+    print(f"Extracting text from image: {input_path}")
+    full_text = extract_text_from_image(input_path)
 else:
-    print(f"PDF not found at {pdf_path}.")
+    raise ValueError("Unsupported file format. Please provide a .pdf, .jpg, or .png file.")        
 
-chunks = chunk_text(patient_report_text)
-print(f"Extracted {len(chunks)} text chunk(s) from report.")
+
+chunks = chunk_text(full_text)
+print(f"Extracted {len(chunks)} chunk(s) from the report.")
 
 final_reports = []
 for i, chunk in enumerate(chunks, 1):
-    print(f"\nProcessing chunk {i}/{len(chunks)}...")
+    print(f"\n🔹 Processing chunk {i}/{len(chunks)}...")
     state = comorbidity_pipeline.invoke({"patient_report": chunk})
     final_text = (
-        "\n\n".join(state["final_report"]) 
-        if isinstance(state["final_report"], list) 
+        "\n\n".join(state["final_report"])
+        if isinstance(state["final_report"], list)
         else state["final_report"]
     )
-    final_reports.append(f'## Chunk {i}\n{final_text}')
+    final_reports.append(f"## Chunk {i}\n{final_text}")
 
+# ---- Combine and Save ----
 combined_report = "\n\n---\n\n".join(final_reports)
 
 print("\n========== FINAL REPORT ==========\n")
