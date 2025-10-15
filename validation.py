@@ -15,6 +15,7 @@ vectorstore = Chroma(
 def search_comorbidities(query: str, k: int = 3):
     """
     Searches the comorbidity vector database for relevant entries.
+    Returns a list of Document objects.
     """
     results = vectorstore.similarity_search(query, k=k)
 
@@ -29,6 +30,9 @@ def search_comorbidities(query: str, k: int = 3):
         print(f"   ICD-10: {r.metadata.get('icd10', 'N/A')}")
         print(f"   Chunk ID: {r.metadata.get('chunk_id', '-')}")
         print(f"   Text: {r.page_content[:300]}...")
+    
+    results = vectorstore.similarity_search(query, k = k)
+    return results
 
 # Example search
 search_comorbidities("hypertension")
