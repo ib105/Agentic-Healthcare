@@ -128,20 +128,6 @@ def assign_workers(state: State):
     return [Send("condition_extractor_worker", {"task": "Extract conditions", "patient_report": state["patient_report"]})]
 
 # ============================
-# PDF Extraction
-# ============================
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """
-    Extracts text from a 1-page PDF medical report.
-    Retruns a single string of text.
-    """
-    with fitz.open(pdf_path) as doc:
-        text = ""
-        for page in doc:
-            text += page.get_text("text") + "\n"
-    return text.strip()
-
-# ============================
 # Graph Assembly
 # ============================
 graph = StateGraph(State)
