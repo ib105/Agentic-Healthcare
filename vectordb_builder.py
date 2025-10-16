@@ -7,21 +7,21 @@ from chromadb.config import Settings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # ===========================================================
-# Step 1 — Load and Clean Data
+# Load and Clean Data
 # ===========================================================
-# Load Excel
+
 df = pd.read_excel("Comorbidities.xlsx")
 
-# Step 1: Drop fully empty rows
+# Drop fully empty rows
 df.dropna(how="all", inplace=True)
 
-# Step 2: Forward-fill comorbid conditions
+# Forward-fill comorbid conditions
 df["comorbidconditions"] = df["comorbidconditions"].ffill()
 
-# Step 3: Forward-fill ICD code rows (some appear only in problem/symptom continuation)
+# Forward-fill ICD code rows (some appear only in problem/symptom continuation)
 df["icd10codes"] = df["icd10codes"].ffill()
 
-# Step 4: Extract clean ICD-10 codes
+# Extract clean ICD-10 codes
 def extract_icd_codes(text):
     if pd.isna(text):
         return None
@@ -30,7 +30,7 @@ def extract_icd_codes(text):
 
 df["icd10codes_clean"] = df["icd10codes"].apply(extract_icd_codes)
 
-# Step 5: Combine consecutive rows belonging to the same (condition + ICD) group
+# Combine consecutive rows belonging to the same (condition + ICD) group
 group_cols = ["comorbidconditions", "icd10codes_clean"]
 
 combined_df = (
@@ -41,7 +41,7 @@ combined_df = (
       .reset_index()
 )
 
-# Step 6: Build combined text for embeddings
+# Build combined text for embeddings
 combined_df["text"] = (
     "Comorbid Condition: " + combined_df["comorbidconditions"] + ". "
     + "ICD-10 Code: " + combined_df["icd10codes_clean"].fillna("") + ". "
@@ -49,7 +49,7 @@ combined_df["text"] = (
 )
 
 # ===========================================================
-# Step 2 — Text Chunking (for better embedding performance)
+# Text Chunking (for better embedding performance)
 # ===========================================================
 # We'll use RecursiveCharacterTextSplitter for smart splitting
 # so that sections don't break mid-sentence or mid-word
@@ -75,10 +75,10 @@ for _, row in combined_df.iterrows():
             )
         )
 
-print(f"✅ Created {len(docs)} text chunks from {len(combined_df)} comorbid conditions")
+print(f"Created {len(docs)} text chunks from {len(combined_df)} comorbid conditions")
 
 # ===========================================================
-# Step 3 — Build and Persist Vector Store
+# Build and Persist Vector Store
 # ===========================================================
 embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
@@ -89,6 +89,9 @@ vectorstore = Chroma.from_documents(
     client_settings=Settings(anonymized_telemetry=False)
 )
 
-print("✅ Vector database built successfully and persisted at ./chroma_db")
+print("Vector database built successfully and persisted at ./chroma_db")
 docs = vectorstore.get(include=["metadatas", "documents"])
-print(docs["metadatas"][:3])  # show first few entries
+
+# Check the first embedded document content
+first_doc = docs["documents"][0]
+print(first_doc[:500])  # shows the first 500 chars of the embedded text
