@@ -152,42 +152,43 @@ with open("workflow.png", "wb") as f:
     f.write(graph_image)
 print("Workflow graph saved as workflow.png")
 
-# ============================
-# Example Run
-# ============================
-input_path = "Med-reports/Cardiologist-Viskin-Report-page-1.jpg"
+if __name__ == "__main__":
+    # ============================
+    # Example Run
+    # ============================
+    input_path = "Med-reports/Cardiologist-Viskin-Report-page-1.jpg"
 
-# Detect file type
-ext = os.path.splitext(input_path)[-1].lower()
+    # Detect file type
+    ext = os.path.splitext(input_path)[-1].lower()
 
-if not os.path.exists(input_path):
-    print(f"File not found at {input_path}.")
-elif ext == ".pdf":
-    print(f"Extracting text from PDF: {input_path}")
-    full_text = extract_text_from_pdf(input_path)
-elif ext in [".jpg", ".jpeg", ".png"]:
-    print(f"Extracting text from image: {input_path}")
-    full_text = extract_text_from_image(input_path)
-else:
-    raise ValueError("Unsupported file format. Please provide a .pdf, .jpg, or .png file.")        
+    if not os.path.exists(input_path):
+        print(f"File not found at {input_path}.")
+    elif ext == ".pdf":
+        print(f"Extracting text from PDF: {input_path}")
+        full_text = extract_text_from_pdf(input_path)
+    elif ext in [".jpg", ".jpeg", ".png"]:
+        print(f"Extracting text from image: {input_path}")
+        full_text = extract_text_from_image(input_path)
+    else:
+        raise ValueError("Unsupported file format. Please provide a .pdf, .jpg, or .png file.")        
 
 
-chunks = chunk_text(full_text)
-print(f"Extracted {len(chunks)} chunk(s) from the report.")
+    chunks = chunk_text(full_text)
+    print(f"Extracted {len(chunks)} chunk(s) from the report.")
 
-final_reports = []
-for i, chunk in enumerate(chunks, 1):
-    print(f"\nProcessing chunk {i}/{len(chunks)}...")
-    state = comorbidity_pipeline.invoke({"patient_report": chunk})
-    final_text = (
-        "\n\n".join(state["final_report"])
-        if isinstance(state["final_report"], list)
-        else state["final_report"]
-    )
-    final_reports.append(f"## Chunk {i}\n{final_text}")
+    final_reports = []
+    for i, chunk in enumerate(chunks, 1):
+        print(f"\nProcessing chunk {i}/{len(chunks)}...")
+        state = comorbidity_pipeline.invoke({"patient_report": chunk})
+        final_text = (
+            "\n\n".join(state["final_report"])
+            if isinstance(state["final_report"], list)
+            else state["final_report"]
+        )
+        final_reports.append(f"## Chunk {i}\n{final_text}")
 
-# ---- Combine and Save ----
-combined_report = "\n\n---\n\n".join(final_reports)
+    # ---- Combine and Save ----
+    combined_report = "\n\n---\n\n".join(final_reports)
 
-print("\n========== FINAL REPORT ==========\n")
-print(combined_report[:3000] + ("\n\n...[truncated]" if len(combined_report) > 3000 else ""))
+    print("\n========== FINAL REPORT ==========\n")
+    print(combined_report[:3000] + ("\n\n...[truncated]" if len(combined_report) > 3000 else ""))
