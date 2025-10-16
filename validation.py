@@ -15,24 +15,21 @@ vectorstore = Chroma(
 def search_comorbidities(query: str, k: int = 3):
     """
     Searches the comorbidity vector database for relevant entries.
-    Returns a list of Document objects.
+    Returns a list of (Document, distance) tuples.
     """
-    results = vectorstore.similarity_search(query, k=k)
+    results_with_scores = vectorstore.similarity_search_with_score(query, k=k)
 
-    if not results:
+    if not results_with_scores:
         print("No relevant comorbidities found.")
-        return
+        return []
 
-    print(f"\nTop {len(results)} matching comorbidities for query: '{query}'")
+    print(f"\nTop {len(results_with_scores)} matching comorbidities for query: '{query}'")
 
-    for i, r in enumerate(results, 1):
-        print(f"\n{i}. Condition: {r.metadata.get('condition', 'Unknown')}")
-        print(f"   ICD-10: {r.metadata.get('icd10', 'N/A')}")
-        print(f"   Chunk ID: {r.metadata.get('chunk_id', '-')}")
-        print(f"   Text: {r.page_content[:300]}...")
-    
-    results = vectorstore.similarity_search(query, k = k)
-    return results
+    for i, (doc, distance) in enumerate(results_with_scores, 1):
+        print(f"\n{i}. Condition: {doc.metadata.get('condition', 'Unknown')}")
+        print(f"   ICD-10: {doc.metadata.get('icd10', 'N/A')}")
+        print(f"   Chunk ID: {doc.metadata.get('chunk_id', '-')}")
+        print(f"   Distance: {distance:.4f}") 
+        print(f"   Text: {doc.page_content[:200]}...")
 
-# Example search
-search_comorbidities("hypertension")
+    return results_with_scores
