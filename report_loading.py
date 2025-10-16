@@ -1,6 +1,29 @@
 import fitz  # PyMuPDF
 import re
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import pytesseract
+from PIL import Image
+
+def extract_text_from_image(image_path: str) -> str:
+    """
+    Extracts text from a medical report image (JPG, PNG, etc.)
+    using Tesseract OCR.
+    """
+    try:
+        img = Image.open(image_path)
+    except Exception as e:
+        raise ValueError(f"Error opening image: {e}")
+
+    # Run OCR
+    text = pytesseract.image_to_string(img, lang="eng")
+
+    # Clean up whitespace
+    text = text.replace("\n", " ").strip()
+
+    if not text:
+        raise ValueError("No text detected in image. Try improving image quality or contrast.")
+
+    return text
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """
