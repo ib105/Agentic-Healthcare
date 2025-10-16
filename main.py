@@ -177,7 +177,7 @@ print(f"Extracted {len(chunks)} chunk(s) from the report.")
 
 final_reports = []
 for i, chunk in enumerate(chunks, 1):
-    print(f"\n🔹 Processing chunk {i}/{len(chunks)}...")
+    print(f"\nProcessing chunk {i}/{len(chunks)}...")
     state = comorbidity_pipeline.invoke({"patient_report": chunk})
     final_text = (
         "\n\n".join(state["final_report"])
