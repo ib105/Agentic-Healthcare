@@ -1,9 +1,8 @@
 import pandas as pd
 import re
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
-from chromadb.config import Settings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # ===========================================================
@@ -15,10 +14,8 @@ df = pd.read_excel("Comorbidities.xlsx")
 # Drop fully empty rows
 df.dropna(how="all", inplace=True)
 
-# Forward-fill comorbid conditions
+# Forward-fill comorbid conditions and ICD codes
 df["comorbidconditions"] = df["comorbidconditions"].ffill()
-
-# Forward-fill ICD code rows (some appear only in problem/symptom continuation)
 df["icd10codes"] = df["icd10codes"].ffill()
 
 # Extract clean ICD-10 codes
@@ -32,7 +29,6 @@ df["icd10codes_clean"] = df["icd10codes"].apply(extract_icd_codes)
 
 # Combine consecutive rows belonging to the same (condition + ICD) group
 group_cols = ["comorbidconditions", "icd10codes_clean"]
-
 combined_df = (
     df.groupby(group_cols, dropna=True, sort=False)
       .agg({
@@ -49,17 +45,14 @@ combined_df["text"] = (
 )
 
 # ===========================================================
-# Text Chunking (for better embedding performance)
+# Text Chunking
 # ===========================================================
-# We'll use RecursiveCharacterTextSplitter for smart splitting
-# so that sections don't break mid-sentence or mid-word
 splitter = RecursiveCharacterTextSplitter(
-    chunk_size=800,    # Aim for ~800 characters (or ~400 tokens)
-    chunk_overlap=150, # Overlap helps maintain context continuity
+    chunk_size=800,
+    chunk_overlap=150,
     separators=["\n\n", "\n", ".", " ", ""]
 )
 
-# Create list of Document chunks
 docs = []
 for _, row in combined_df.iterrows():
     chunks = splitter.split_text(row["text"])
@@ -78,20 +71,14 @@ for _, row in combined_df.iterrows():
 print(f"Created {len(docs)} text chunks from {len(combined_df)} comorbid conditions")
 
 # ===========================================================
-# Build and Persist Vector Store
+# Build and Persist Vector Store (FAISS)
 # ===========================================================
 embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-vectorstore = Chroma.from_documents(
-    documents=docs,
-    embedding=embedding_function,
-    persist_directory="./chroma_db",
-    client_settings=Settings(anonymized_telemetry=False)
-)
+# Build FAISS vector store
+vectorstore = FAISS.from_documents(documents=docs, embedding=embedding_function)
 
-print("Vector database built successfully and persisted at ./chroma_db")
-docs = vectorstore.get(include=["metadatas", "documents"])
+# Persist FAISS index locally
+vectorstore.save_local("./comorbidities_faiss")
 
-# Check the first embedded document content
-first_doc = docs["documents"][0]
-print(first_doc[:500])  # shows the first 500 chars of the embedded text
+print("FAISS vector database built and saved to ./comorbidities_faiss")
