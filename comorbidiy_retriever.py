@@ -6,7 +6,7 @@ embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 # --- Load FAISS Vector Store (previously saved using save_local("./faiss_db")) ---
 vectorstore = FAISS.load_local(
-    "./faiss_db",
+    "./comorbidities_faiss",
     embeddings=embedding_function,
     allow_dangerous_deserialization=True  # required for local pickle load
 )
