@@ -10,8 +10,8 @@ from langgraph.types import Send
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 
-# Import search function from validation.py
-from validation import search_comorbidities
+from comorbidity_retriever import search_comorbidities
+from cpt_retriever import search_cpt_codes
 from report_loading import extract_text_from_pdf, chunk_text, extract_text_from_image
 
 # ============================
@@ -61,7 +61,6 @@ class WorkerState(TypedDict):
 # ============================
 # Nodes
 # ============================
-
 def orchestrator(state: State):
     """Define multiple tasks for medical analysis workflow."""
     tasks = [
@@ -113,6 +112,49 @@ def comorbidity_worker(state: WorkerState):
 
     return {"completed_sections": ["\n".join(comorbidity_summary)]}
 
+def cpt_worker(state: WorkerState):
+    """Worker 3: Finds related CPT/HCPCS procedure codes for extracted conditions and generates clinical explanations."""
+    if not state.get("extracted_conditions"):
+        return {"completed_sections": ["No extracted conditions available for CPT code analysis."]}
+
+    cpt_summary = ["### Suggested CPT/HCPCS Codes"]
+
+    for condition in state["extracted_conditions"]:
+        cpt_summary.append(f"\n#### {condition}")
+
+        # Step 1: Retrieve top matches from FAISS
+        results = search_cpt_codes(condition, k=5)
+
+        if not results:
+            cpt_summary.append("- No related CPT codes found.")
+            continue
+
+        # Step 2: Format retrieved data
+        top_codes = [
+            f"{item['code']} — {item['description']} (similarity: {item['similarity']})"
+            for item in results
+        ]
+        formatted_codes = "\n".join([f"- {c}" for c in top_codes])
+
+        # Step 3: Ask the LLM to summarize CPT mapping contextually
+        prompt = f"""
+        You are a clinical coding assistant. Based on the following retrieved CPT/HCPCS codes and their descriptions, explain what procedures might relate to the condition: "{condition}".
+        If there is no single direct CPT code, say that explicitly and summarize the likely related categories.
+        
+        Retrieved codes:
+        {formatted_codes}
+
+        Respond in a concise markdown section with:
+        - A short overview paragraph.
+        - A bulleted list of relevant codes and their use.
+        """
+
+        llm_response = llm.invoke([HumanMessage(content=prompt)])
+
+        cpt_summary.append(llm_response.content.strip())
+
+    return {"completed_sections": ["\n".join(cpt_summary)]}
+
 
 def synthesizer(state: State):
     """Combine all worker results into a final report."""
@@ -134,12 +176,14 @@ graph = StateGraph(State)
 graph.add_node("orchestrator", orchestrator)
 graph.add_node("condition_extractor_worker", condition_extractor_worker)
 graph.add_node("comorbidity_worker", comorbidity_worker)
+graph.add_node("cpt_worker", cpt_worker)
 graph.add_node("synthesizer", synthesizer)
 
 graph.add_edge(START, "orchestrator")
 graph.add_conditional_edges("orchestrator", assign_workers, ["condition_extractor_worker"])
 graph.add_edge("condition_extractor_worker", "comorbidity_worker")
-graph.add_edge("comorbidity_worker", "synthesizer")
+graph.add_edge("comorbidity_worker", "cpt_worker")
+graph.add_edge("cpt_worker", "synthesizer")
 graph.add_edge("synthesizer", END)
 
 comorbidity_pipeline = graph.compile()
