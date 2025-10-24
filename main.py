@@ -12,6 +12,7 @@ from langgraph.graph import StateGraph, START, END
 
 from comorbidity_retriever import search_comorbidities
 from cpt_retriever import search_cpt_codes
+from icd11_retriever import search_icd11_local, fetch_icd11_local_details
 from report_loading import extract_text_from_pdf, chunk_text, extract_text_from_image
 
 # ============================
@@ -155,6 +156,30 @@ def cpt_worker(state: WorkerState):
 
     return {"completed_sections": ["\n".join(cpt_summary)]}
 
+def icd11_local_worker(state: WorkerState):
+    """Worker 4: Retrieves ICD-11 diagnostic codes and summaries."""
+    if not state.get("extracted_conditions"):
+        return {"completed_sections": ["No extracted conditions available for ICD-11 lookup."]}
+
+    icd_sections = ["### ICD-11 Diagnostic Codes (Local API)"]
+
+    for condition in state["extracted_conditions"]:
+        icd_sections.append(f"\n#### {condition}")
+        results = search_icd11_local(condition, limit=3)
+
+        if not results:
+            icd_sections.append("- No matching ICD-11 codes found.")
+            continue
+
+        for res in results:
+            icd_sections.append(f"- **{res['code']}** — {res['title']}")
+            if res["uri"]:
+                detail = fetch_icd11_local_details(res["uri"])
+                if detail and detail.get("definition"):
+                    icd_sections.append(f"  *Definition:* {detail['definition'][:250]}...")
+
+    return {"completed_sections": ["\n".join(icd_sections)]}
+
 
 def synthesizer(state: State):
     """Combine all worker results into a final report."""
@@ -177,13 +202,15 @@ graph.add_node("orchestrator", orchestrator)
 graph.add_node("condition_extractor_worker", condition_extractor_worker)
 graph.add_node("comorbidity_worker", comorbidity_worker)
 graph.add_node("cpt_worker", cpt_worker)
+graph.add_node("icd11_local_worker", icd11_local_worker)
 graph.add_node("synthesizer", synthesizer)
 
 graph.add_edge(START, "orchestrator")
 graph.add_conditional_edges("orchestrator", assign_workers, ["condition_extractor_worker"])
 graph.add_edge("condition_extractor_worker", "comorbidity_worker")
 graph.add_edge("comorbidity_worker", "cpt_worker")
-graph.add_edge("cpt_worker", "synthesizer")
+graph.add_edge("cpt_worker", "icd11_local_worker")
+graph.add_edge("icd11_local_worker", "synthesizer")
 graph.add_edge("synthesizer", END)
 
 comorbidity_pipeline = graph.compile()
@@ -235,4 +262,4 @@ if __name__ == "__main__":
     combined_report = "\n\n---\n\n".join(final_reports)
 
     print("\n========== FINAL REPORT ==========\n")
-    print(combined_report[:3000] + ("\n\n...[truncated]" if len(combined_report) > 3000 else ""))
+    print(combined_report)
