@@ -342,6 +342,25 @@ def browse_chapter(chapter_code: str, max_results: int = 20) -> List[Dict]:
     
     return []
 
+def get_z_codes_for_condition(condition: str, limit: int = 3) -> List[Dict]:
+    """
+    Search for ICD-11 Z-codes (Chapter 24: Factors influencing health status).
+    Z-codes start with 'Q' in ICD-11 (e.g., QA00-QE8Z).
+    """
+    z_query = f"{condition} factors influencing health status screening prevention"
+    results = search_icd11(z_query, limit=limit*3, filter_blocks=True)
+    
+    # Filter for Chapter 24 codes (Q prefix)
+    z_codes = [r for r in results if r['code'].startswith('Q')][:limit]
+    
+    # If no Q codes, try broader search
+    if not z_codes:
+        z_query = f"history of {condition}"
+        results = search_icd11(z_query, limit=limit*2)
+        z_codes = [r for r in results if r['code'].startswith('Q')][:limit]
+    
+    return z_codes
+
 # ------------------------------
 # Test function
 # ------------------------------
