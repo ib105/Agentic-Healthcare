@@ -10,6 +10,10 @@ import pytesseract
 from pytesseract import Output
 import concurrent.futures
 from functools import lru_cache
+import re
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from main import medical_coding_pipeline, llm
 from report_loading import extract_text_from_pdf, extract_text_from_image
@@ -20,10 +24,105 @@ from langchain_core.messages import HumanMessage
 
 st.set_page_config(page_title="Medical Report Analyzer", layout="wide")
 
+# ===== OPTIMIZATION 1: Cache OCR results =====
 @st.cache_data
 def run_ocr_on_image(image_bytes: bytes) -> Dict:
     image = Image.open(io.BytesIO(image_bytes))
     return pytesseract.image_to_data(image, output_type=Output.DICT, lang='eng')
+
+# ===== OPTIMIZATION 2: Cache ICD-11 details =====
+@lru_cache(maxsize=100)
+def cached_fetch_icd11_details(uri: str) -> Dict:
+    """Cached version of fetch_icd11_details to avoid redundant API calls"""
+    return fetch_icd11_details(uri)
+
+# ===== OPTIMIZATION 3: Batch LLM explanations instead of one-by-one =====
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def get_batch_explanations(entities_with_codes: List[Tuple[str, str, str, str]]) -> Dict[str, str]:
+    """
+    Get explanations for multiple codes in a single LLM call
+    entities_with_codes: [(entity, code, description, code_type), ...]
+    Returns: {f"{entity}|{code}": explanation}
+    """
+    if not entities_with_codes:
+        return {}
+    
+    # Build batch prompt
+    prompts = []
+    for i, (entity, code, description, code_type) in enumerate(entities_with_codes, 1):
+        if code_type == 'comorbidity':
+            prompts.append(f"{i}. Why do {entity} and {description} (ICD-10: {code}) commonly co-occur?")
+        elif code_type == 'icd11':
+            prompts.append(f"{i}. Why is ICD-11 code {code} ({description}) used for {entity}?")
+        elif code_type == 'cpt':
+            prompts.append(f"{i}. What does CPT code {code} ({description}) involve for {entity}?")
+        elif code_type == 'z_code':
+            prompts.append(f"{i}. What does Z-code {code} ({description}) represent for {entity}?")
+    
+    batch_prompt = f"""Answer each question in EXACTLY 2-3 concise lines. Number your responses (1., 2., etc.):
+
+{chr(10).join(prompts)}"""
+    
+    try:
+        response = llm.invoke([HumanMessage(content=batch_prompt)])
+        content = response.content.strip()
+        
+        # Parse numbered responses
+        explanations = {}
+        lines = content.split('\n')
+        current_num = 0
+        current_text = []
+        
+        for line in lines:
+            match = re.match(r'^(\d+)\.\s*(.+)', line)
+            if match:
+                # Save previous explanation
+                if current_num > 0 and current_text:
+                    entity, code, desc, _ = entities_with_codes[current_num - 1]
+                    key = f"{entity}|{code}"
+                    explanations[key] = ' '.join(current_text).strip()
+                
+                # Start new explanation
+                current_num = int(match.group(1))
+                current_text = [match.group(2)]
+            elif current_num > 0:
+                current_text.append(line.strip())
+        
+        # Save last explanation
+        if current_num > 0 and current_text:
+            entity, code, desc, _ = entities_with_codes[current_num - 1]
+            key = f"{entity}|{code}"
+            explanations[key] = ' '.join(current_text).strip()
+        
+        return explanations
+    except Exception as e:
+        print(f"Batch explanation error: {e}")
+        return {}
+
+# ===== OPTIMIZATION 4: Normalize entities for better matching =====
+def normalize_entity(entity: str) -> List[str]:
+    """
+    Split complex entities into simpler searchable terms
+    Returns list of variants to try matching
+    """
+    variants = [entity]
+    
+    # Remove parentheses content but keep both versions
+    if '(' in entity:
+        base = re.sub(r'\([^)]*\)', '', entity).strip()
+        inside = re.findall(r'\(([^)]*)\)', entity)
+        variants.append(base)
+        variants.extend(inside)
+    
+    # Split on "and" for compound procedures
+    if ' and ' in entity.lower():
+        parts = re.split(r'\s+and\s+', entity, flags=re.IGNORECASE)
+        variants.extend(parts)
+    
+    # Remove extra whitespace
+    variants = [' '.join(v.split()) for v in variants if v.strip()]
+    
+    return list(set(variants))  # Remove duplicates
 
 def convert_pdf_to_image(pdf_path: str) -> Image.Image:
     doc = fitz.open(pdf_path)
@@ -44,27 +143,35 @@ def create_text_index(ocr_data: Dict) -> Dict[str, List[int]]:
     return index
 
 def find_entity_positions_optimized(entity: str, text_index: Dict, ocr_data: Dict) -> List[int]:
-    words = entity.lower().split()
-    if not words:
-        return []
+    """Try multiple entity variants for better matching"""
+    variants = normalize_entity(entity)
     
-    first_word_positions = text_index.get(words[0], [])
-    matched_positions = []
-    
-    for pos in first_word_positions:
-        match = True
-        for offset, word in enumerate(words[1:], 1):
-            if pos + offset >= len(ocr_data['text']):
-                match = False
-                break
-            if ocr_data['text'][pos + offset].lower().strip() != word:
-                match = False
-                break
+    for variant in variants:
+        words = variant.lower().split()
+        if not words:
+            continue
         
-        if match:
-            matched_positions.append(pos)
+        first_word_positions = text_index.get(words[0], [])
+        matched_positions = []
+        
+        for pos in first_word_positions:
+            match = True
+            for offset, word in enumerate(words[1:], 1):
+                if pos + offset >= len(ocr_data['text']):
+                    match = False
+                    break
+                if ocr_data['text'][pos + offset].lower().strip() != word:
+                    match = False
+                    break
+            
+            if match:
+                matched_positions.append(pos)
+        
+        # Return first variant that finds matches
+        if matched_positions:
+            return matched_positions
     
-    return matched_positions
+    return []
 
 def find_and_highlight(image: Image.Image, ocr_data: Dict, conditions: List[str], 
                       procedures: List[str], health_factors: List[str]) -> Tuple[Image.Image, Dict]:
@@ -85,10 +192,12 @@ def find_and_highlight(image: Image.Image, ocr_data: Dict, conditions: List[str]
         for entity in entities:
             positions[entity_type][entity] = []
             matched_positions = find_entity_positions_optimized(entity, text_index, ocr_data)
+            
+            # Try matching original entity first
             word_count = len(entity.split())
             
             for start_pos in matched_positions:
-                boxes_indices = list(range(start_pos, start_pos + word_count))
+                boxes_indices = list(range(start_pos, min(start_pos + word_count, len(ocr_data['text']))))
                 xs = [ocr_data['left'][idx] for idx in boxes_indices]
                 ys = [ocr_data['top'][idx] for idx in boxes_indices]
                 ws = [ocr_data['width'][idx] for idx in boxes_indices]
@@ -117,34 +226,41 @@ def find_and_highlight(image: Image.Image, ocr_data: Dict, conditions: List[str]
     
     return img_with_highlights, positions
 
-def get_concise_explanation(entity: str, code: str, description: str, code_type: str) -> str:
-    prompts = {
-        'comorbidity': f'In exactly 3 lines, explain why {entity} and {description} (ICD-10: {code}) commonly co-occur and the clinical relevance.',
-        'icd11': f'In exactly 3 lines, explain why ICD-11 code {code} ({description}) is used for {entity} and when to apply it.',
-        'cpt': f'In exactly 3 lines, explain what CPT code {code} ({description}) involves and why it matches {entity}.',
-        'z_code': f'In exactly 3 lines, explain what Z-code {code} ({description}) represents and why it applies to {entity}.'
-    }
-    
-    try:
-        response = llm.invoke([HumanMessage(content=prompts[code_type])])
-        return response.content.strip().replace('**', '').replace('###', '').replace('*', '')
-    except:
-        return f"Code {code} for {entity}. Click for details."
-
-def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], health_factors: List[str]) -> Dict:
+# ===== OPTIMIZATION 5: Collect all codes first, then batch explain =====
+def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], health_factors: List[str]) -> Tuple[Dict, List]:
     entity_data = {'conditions': {}, 'procedures': {}, 'health_factors': {}}
+    codes_for_explanation = []  # Collect all codes needing explanation
     
     def fetch_condition_data(condition):
-        return condition, {
-            'comorbidities': search_comorbidities(condition, k=3),
-            'icd11': search_icd11(condition, limit=3, filter_blocks=True)
-        }
+        comorbidities = search_comorbidities(condition, k=3)
+        icd11 = search_icd11(condition, limit=3, filter_blocks=True)
+        
+        # Collect codes for batch explanation
+        for doc, dist in comorbidities:
+            name = doc.metadata.get("condition", "Unknown")
+            icd10 = doc.metadata.get("icd10", "N/A")
+            codes_for_explanation.append((condition, icd10, name, 'comorbidity'))
+        
+        for item in icd11:
+            codes_for_explanation.append((condition, item['code'], item['title'], 'icd11'))
+        
+        return condition, {'comorbidities': comorbidities, 'icd11': icd11}
     
     def fetch_procedure_data(procedure):
-        return procedure, {'cpt': search_cpt_codes(procedure, k=3)}
+        cpt = search_cpt_codes(procedure, k=3)
+        
+        for item in cpt:
+            codes_for_explanation.append((procedure, item['code'], item['description'], 'cpt'))
+        
+        return procedure, {'cpt': cpt}
     
     def fetch_health_factor_data(factor):
-        return factor, {'z_codes': get_z_codes_for_condition(factor, limit=3)}
+        z_codes = get_z_codes_for_condition(factor, limit=3)
+        
+        for item in z_codes:
+            codes_for_explanation.append((factor, item['code'], item['title'], 'z_code'))
+        
+        return factor, {'z_codes': z_codes}
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         condition_futures = [executor.submit(fetch_condition_data, c) for c in conditions]
@@ -172,9 +288,9 @@ def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], healt
             except:
                 pass
     
-    return entity_data
+    return entity_data, codes_for_explanation
 
-def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict) -> str:
+def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict, explanations: Dict) -> str:
     highlights = ""
     modals = ""
     detail_modals = ""
@@ -205,7 +321,9 @@ def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict) 
                             
                             comorbid_buttons += f'<button class="code-btn" onclick="show(\'{cid}\')">{name}<br><small>Distance: {dist:.3f}</small></button>'
                             
-                            explanation = get_concise_explanation(entity, icd10, name, 'comorbidity')
+                            # Get explanation from batch
+                            explanation = explanations.get(f"{entity}|{icd10}", f"Related comorbidity for {entity}.")
+                            
                             detail_modals += f'''<div id="{cid}" class="smd" onclick="hide('{cid}')">
                                 <div class="smc" onclick="event.stopPropagation()">
                                     <span class="x" onclick="hide('{cid}')">&times;</span>
@@ -227,7 +345,8 @@ def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict) 
                             
                             icd11_buttons += f'<button class="code-btn" onclick="show(\'{iid}\')">{code}<br><small>{title[:40]}...</small></button>'
                             
-                            explanation = get_concise_explanation(entity, code, title, 'icd11')
+                            explanation = explanations.get(f"{entity}|{code}", f"ICD-11 code for {entity}.")
+                            
                             detail_modals += f'''<div id="{iid}" class="smd" onclick="hide('{iid}')">
                                 <div class="smc" onclick="event.stopPropagation()">
                                     <span class="x" onclick="hide('{iid}')">&times;</span>
@@ -267,7 +386,8 @@ def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict) 
                             
                             cpt_buttons += f'<button class="code-btn" onclick="show(\'{pid}\')">{code}<br><small>{desc[:40]}...</small></button>'
                             
-                            explanation = get_concise_explanation(entity, code, desc, 'cpt')
+                            explanation = explanations.get(f"{entity}|{code}", f"CPT code for {entity}.")
+                            
                             detail_modals += f'''<div id="{pid}" class="smd" onclick="hide('{pid}')">
                                 <div class="smc" onclick="event.stopPropagation()">
                                     <span class="x" onclick="hide('{pid}')">&times;</span>
@@ -299,7 +419,8 @@ def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict) 
                             
                             z_buttons += f'<button class="code-btn" onclick="show(\'{zid}\')">{code}<br><small>{title[:40]}...</small></button>'
                             
-                            explanation = get_concise_explanation(entity, code, title, 'z_code')
+                            explanation = explanations.get(f"{entity}|{code}", f"Z-code for {entity}.")
+                            
                             detail_modals += f'''<div id="{zid}" class="smd" onclick="hide('{zid}')">
                                 <div class="smc" onclick="event.stopPropagation()">
                                     <span class="x" onclick="hide('{zid}')">&times;</span>
@@ -429,7 +550,12 @@ if uploaded_file:
                             st.markdown(f"- {h}")
                 
                 with st.spinner("Retrieving medical codes..."):
-                    entity_data = fetch_all_codes_parallel(conditions, procedures, health_factors)
+                    # Fetch all codes AND collect what needs explanation
+                    entity_data, codes_for_explanation = fetch_all_codes_parallel(conditions, procedures, health_factors)
+                
+                # ===== KEY OPTIMIZATION: Single batch LLM call for ALL explanations =====
+                with st.spinner("Generating explanations..."):
+                    explanations = get_batch_explanations(codes_for_explanation)
                 
                 with st.spinner("Highlighting entities..."):
                     highlighted_img, positions = find_and_highlight(
@@ -440,7 +566,7 @@ if uploaded_file:
                 highlighted_img.save(buffered, format="PNG")
                 img_b64 = base64.b64encode(buffered.getvalue()).decode()
                 
-                html = create_interactive_html(img_b64, positions, entity_data)
+                html = create_interactive_html(img_b64, positions, entity_data, explanations)
                 
                 st.markdown("### Interactive Medical Report")
                 st.markdown("**Click highlighted entities** to view medical codes. Click code buttons for details.")
