@@ -1,6 +1,6 @@
 import os
-import operator
 from dotenv import load_dotenv
+import operator
 from typing import Annotated, List
 from pydantic import BaseModel, Field
 
@@ -15,11 +15,20 @@ from cpt_retriever import search_cpt_codes
 from icd11_retriever import search_icd11, fetch_icd11_details, get_z_codes_for_condition
 from report_loading import extract_text_from_pdf, chunk_text, extract_text_from_image
 
-# ============================
-# Environment Setup
-# ============================
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
+
+def safe_llm_invoke(messages, fallback_text="Analysis unavailable due to API limits."):
+    """Wrapper for LLM calls with quota error handling"""
+    try:
+        return llm.invoke(messages)
+    except Exception as e:
+        if "429" in str(e) or "quota" in str(e).lower() or "ResourceExhausted" in str(e):
+            print(f"API quota exceeded. Using fallback response.")
+            # Return a mock response
+            from langchain_core.messages import AIMessage
+            return AIMessage(content=fallback_text)
+        raise e
 
 # ============================
 # LLM Setup
@@ -117,7 +126,6 @@ Highlight them in the text using: **bold for conditions**, __underline for proce
         "extracted_health_factors": extracted_health_factors
     }
 
-
 def comorbidity_worker(state: ConditionWorkerState):
     """Worker: Finds potential comorbidities for extracted conditions."""
     if not state.get("extracted_conditions"):
@@ -155,7 +163,7 @@ def icd11_worker(state: ConditionWorkerState):
             icd_sections.append("- No matching ICD-11 codes found.")
             continue
 
-        # Get best match
+        # Get exact/best match
         best_match = results[0]
         icd_sections.append(f"- **Primary:** {best_match['code']} — {best_match['title']}")
         
@@ -188,27 +196,16 @@ def cpt_worker(state: ProcedureWorkerState):
             cpt_summary.append("- No related CPT codes found.")
             continue
 
-        top_codes = [
-            f"{item['code']} — {item['description']} (similarity: {item['similarity']})"
-            for item in results
-        ]
-        formatted_codes = "\n".join([f"- {c}" for c in top_codes])
-
-        prompt = f"""
-You are a clinical coding expert. Analyze these retrieved CPT codes for the procedure: "{procedure}".
-
-Retrieved codes:
-{formatted_codes}
-
-Return ONLY the most relevant code(s) in this exact format:
-**Primary Code:** [CODE] — [Brief description]
-**Alternative:** [CODE] — [Brief description] (only if multiple viable options exist)
-
-If no exact match exists, state "No direct CPT code available" and suggest the closest category.
-Be concise - maximum 2-3 lines.
-"""
-        llm_response = llm.invoke([HumanMessage(content=prompt)])
-        cpt_summary.append(llm_response.content.strip())
+        cpt_summary.append(f"**Primary Code:** {results[0]['code']} — {results[0]['description']}")
+        
+        if len(results) > 1:
+            cpt_summary.append(f"**Alternative:** {results[1]['code']} — {results[1]['description']}")
+        
+        # Optionally show more alternatives
+        if len(results) > 2:
+            cpt_summary.append("\n*Other relevant codes:*")
+            for item in results[2:5]:
+                cpt_summary.append(f"- {item['code']} — {item['description'][:60]}...")
 
     return {"completed_sections": ["\n".join(cpt_summary)]}
 
@@ -301,7 +298,9 @@ def orchestrator(state: State):
 # ============================
 graph = StateGraph(State)
 
+
 # Add all nodes
+# NOTE: “orchestrator” is not a node — it’s a routing function
 graph.add_node("entity_extractor", entity_extractor_node)
 graph.add_node("comorbidity_worker", comorbidity_worker)
 graph.add_node("icd11_worker", icd11_worker)
