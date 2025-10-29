@@ -96,62 +96,27 @@ def normalize_term(term: str) -> str:
     return term
 
 @lru_cache(maxsize=1024)
-def get_mms_code_from_foundation(foundation_uri: str, prefer_leaf: bool = True) -> Optional[str]:
+def get_mms_code_from_foundation(foundation_uri: str) -> Optional[str]:
     """
-    Convert a foundation entity URI to its MMS linearization code.
-    If prefer_leaf=True, tries to get a leaf node code instead of block codes.
+    Convert a foundation entity URI to its MMS linearization base code.
+    Does not attempt to traverse into child/leaf codes.
     """
     try:
-        # Extract entity ID from URI
         entity_id = foundation_uri.split("/")[-1]
-        
-        # Try MMS linearization endpoint
         mms_url = f"{MMS_LINEARIZATION}/{entity_id}"
-        
         response = requests.get(mms_url, headers=get_headers(), timeout=10)
-        
+
         if response.status_code == 200:
             data = response.json()
-            
-            # Try to get the code
             code = (
-                data.get("code") or
-                data.get("theCode") or
-                data.get("blockId") or
-                data.get("codeRange")
+                data.get("code")
+                or data.get("theCode")
+                or data.get("blockId")
+                or data.get("codeRange")
             )
-            
-            # If we got a block code but want a leaf, try to get first child
-            if code and prefer_leaf and (code.startswith("Block") or "-" in code):
-                children = data.get("child", [])
-                if children:
-                    # Get first child's code
-                    first_child_uri = children[0] if isinstance(children[0], str) else children[0].get("@id", "")
-                    if first_child_uri:
-                        child_code = get_mms_code_from_foundation(first_child_uri, prefer_leaf=False)
-                        if child_code and not child_code.startswith("Block"):
-                            return child_code
-            
-            if code and not code.startswith("Block"):
-                return code
-            
-            # If still a block code, try browsing children
-            if code and code.startswith("Block"):
-                children = data.get("child", [])
-                if children:
-                    for child in children[:3]:  # Check first few children
-                        child_uri = child if isinstance(child, str) else child.get("@id", "")
-                        if child_uri:
-                            child_code = get_mms_code_from_foundation(child_uri, prefer_leaf=False)
-                            if child_code and not child_code.startswith("Block"):
-                                return child_code
-                
-                # Return block code as fallback
-                return code
-                
+            return code
     except Exception as e:
         print(f"[MMS Lookup Error for {foundation_uri}] {e}")
-        
     return None
 
 def search_icd11(term: str, limit: int = 5, use_fuzzy: bool = True, filter_blocks: bool = True) -> List[Dict]:
@@ -191,7 +156,7 @@ def search_icd11(term: str, limit: int = 5, use_fuzzy: bool = True, filter_block
         title = clean_html(item.get("title", "Unknown"))
         
         # Try to get the actual ICD-11 code from MMS linearization
-        code = get_mms_code_from_foundation(foundation_uri, prefer_leaf=filter_blocks)
+        code = get_mms_code_from_foundation(foundation_uri)
         
         # Fallback to any code in the search result
         if not code:
@@ -239,7 +204,7 @@ def fetch_icd11_details(uri: str) -> Optional[Dict]:
         data = response.json()
         
         # Get the MMS code
-        code = get_mms_code_from_foundation(uri, prefer_leaf=True)
+        code = get_mms_code_from_foundation(uri)
         
         if not code:
             code = (
@@ -322,7 +287,7 @@ def browse_chapter(chapter_code: str, max_results: int = 20) -> List[Dict]:
                 child_uri = child if isinstance(child, str) else child.get("@id", "")
                 if child_uri:
                     child_id = child_uri.split("/")[-1]
-                    child_code = get_mms_code_from_foundation(child_uri, prefer_leaf=False)
+                    child_code = get_mms_code_from_foundation(child_uri)
                     
                     # Fetch child details
                     child_response = requests.get(child_uri, headers=get_headers(), timeout=10)
@@ -365,41 +330,8 @@ def get_z_codes_for_condition(condition: str, limit: int = 3) -> List[Dict]:
 # Test function
 # ------------------------------
 if __name__ == "__main__":
-    print("=" * 60)
-    print("ICD-11 API Test with OAuth2 Authentication")
-    print("=" * 60)
-    
-    # Test search
-    print("\n1. Searching for 'Dementia'...")
-    results = search_icd11("Dementia", limit=5)
-    
-    for idx, result in enumerate(results, 1):
-        print(f"\n{idx}. Code: {result['code']}")
-        print(f"   Title: {result['title']}")
-        
-        # Fetch details for first result
-        if idx == 1 and result['uri']:
-            print("\n   Fetching details...")
-            details = fetch_icd11_details(result['uri'])
-            if details:
-                print(f"   Definition: {details['definition'][:200]}...")
-    
-    # Test code lookup
-    print("\n" + "=" * 60)
-    print("2. Looking up code '6D80' (Dementia)...")
-    code_info = search_by_code("6D80")
-    if code_info:
-        print(f"   Code: {code_info['code']}")
-        print(f"   Title: {code_info['title']}")
-        if code_info.get('definition'):
-            print(f"   Definition: {code_info['definition'][:150]}...")
-    
-    # Test another search
-    print("\n" + "=" * 60)
-    print("3. Searching for 'Diabetes'...")
     diabetes_results = search_icd11("Diabetes", limit=3)
     for idx, result in enumerate(diabetes_results, 1):
         print(f"{idx}. {result['code']} — {result['title']}")
     
     print("\n" + "=" * 60)
-    print("Test complete!")
