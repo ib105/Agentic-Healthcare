@@ -24,19 +24,19 @@ from langchain_core.messages import HumanMessage
 
 st.set_page_config(page_title="Medical Report Analyzer", layout="wide")
 
-# ===== OPTIMIZATION 1: Cache OCR results =====
+# ===== Cache OCR results =====
 @st.cache_data
 def run_ocr_on_image(image_bytes: bytes) -> Dict:
     image = Image.open(io.BytesIO(image_bytes))
     return pytesseract.image_to_data(image, output_type=Output.DICT, lang='eng')
 
-# ===== OPTIMIZATION 2: Cache ICD-11 details =====
+# ===== Cache ICD-11 details =====
 @lru_cache(maxsize=100)
 def cached_fetch_icd11_details(uri: str) -> Dict:
     """Cached version of fetch_icd11_details to avoid redundant API calls"""
     return fetch_icd11_details(uri)
 
-# ===== OPTIMIZATION 3: Batch LLM explanations instead of one-by-one =====
+# ===== Batch LLM explanations instead of one-by-one =====
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def get_batch_explanations(entities_with_codes: List[Tuple[str, str, str, str]]) -> Dict[str, str]:
     """
@@ -99,7 +99,7 @@ def get_batch_explanations(entities_with_codes: List[Tuple[str, str, str, str]])
         print(f"Batch explanation error: {e}")
         return {}
 
-# ===== OPTIMIZATION 4: Normalize entities for better matching =====
+# ===== Normalize entities for better matching =====
 def normalize_entity(entity: str) -> List[str]:
     """
     Split complex entities into simpler searchable terms
@@ -119,10 +119,25 @@ def normalize_entity(entity: str) -> List[str]:
         parts = re.split(r'\s+and\s+', entity, flags=re.IGNORECASE)
         variants.extend(parts)
     
-    # Remove extra whitespace
+    # Handle "history of X" patterns
+    if 'history of' in entity.lower():
+        # Try without "history of"
+        without_history = re.sub(r'history of\s+', '', entity, flags=re.IGNORECASE).strip()
+        variants.append(without_history)
+        # Try just the last significant words
+        words = entity.split()
+        if len(words) > 3:
+            variants.append(' '.join(words[-2:]))  # last 2 words
+    
+    # For single-word medical terms, add lowercase variant
+    if len(entity.split()) == 1:
+        variants.append(entity.lower())
+        variants.append(entity.capitalize())
+    
+    # Remove extra whitespace and duplicates
     variants = [' '.join(v.split()) for v in variants if v.strip()]
     
-    return list(set(variants))  # Remove duplicates
+    return list(set(variants))
 
 def convert_pdf_to_image(pdf_path: str) -> Image.Image:
     doc = fitz.open(pdf_path)
@@ -143,7 +158,7 @@ def create_text_index(ocr_data: Dict) -> Dict[str, List[int]]:
     return index
 
 def find_entity_positions_optimized(entity: str, text_index: Dict, ocr_data: Dict) -> List[int]:
-    """Try multiple entity variants for better matching"""
+    """Find entity allowing for surrounding context and punctuation"""
     variants = normalize_entity(entity)
     
     for variant in variants:
@@ -151,25 +166,34 @@ def find_entity_positions_optimized(entity: str, text_index: Dict, ocr_data: Dic
         if not words:
             continue
         
-        first_word_positions = text_index.get(words[0], [])
-        matched_positions = []
+        pattern_words = [re.escape(w) for w in words]
+        
+        # Try exact match first
+        first_word = words[0].strip('.,;:!?')
+        first_word_positions = text_index.get(first_word, [])
         
         for pos in first_word_positions:
             match = True
-            for offset, word in enumerate(words[1:], 1):
+            matched_length = 0
+            
+            # Check if subsequent words match (allowing punctuation)
+            for offset, word in enumerate(words):
                 if pos + offset >= len(ocr_data['text']):
                     match = False
                     break
-                if ocr_data['text'][pos + offset].lower().strip() != word:
+                
+                ocr_word = ocr_data['text'][pos + offset].lower().strip('.,;:!?')
+                search_word = word.strip('.,;:!?')
+                
+                if ocr_word == search_word:
+                    matched_length += 1
+                elif offset == 0:  # First word must match
                     match = False
                     break
             
-            if match:
-                matched_positions.append(pos)
-        
-        # Return first variant that finds matches
-        if matched_positions:
-            return matched_positions
+            # Accept if we matched at least the core phrase
+            if match and matched_length >= len(words):
+                return [pos]
     
     return []
 
@@ -226,7 +250,7 @@ def find_and_highlight(image: Image.Image, ocr_data: Dict, conditions: List[str]
     
     return img_with_highlights, positions
 
-# ===== OPTIMIZATION 5: Collect all codes first, then batch explain =====
+# ===== Collect all codes first, then batch explain =====
 def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], health_factors: List[str]) -> Tuple[Dict, List]:
     entity_data = {'conditions': {}, 'procedures': {}, 'health_factors': {}}
     codes_for_explanation = []  # Collect all codes needing explanation
@@ -553,7 +577,7 @@ if uploaded_file:
                     # Fetch all codes AND collect what needs explanation
                     entity_data, codes_for_explanation = fetch_all_codes_parallel(conditions, procedures, health_factors)
                 
-                # ===== KEY OPTIMIZATION: Single batch LLM call for ALL explanations =====
+                # ===== Single batch LLM call for ALL explanations =====
                 with st.spinner("Generating explanations..."):
                     explanations = get_batch_explanations(codes_for_explanation)
                 
