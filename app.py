@@ -12,17 +12,178 @@ import concurrent.futures
 from functools import lru_cache
 import re
 from dotenv import load_dotenv
+import requests
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
-from main import medical_coding_pipeline, llm
-from report_loading import extract_text_from_pdf, extract_text_from_image
-from comorbidity_retriever import search_comorbidities
-from cpt_retriever import search_cpt_codes
-from icd11_retriever import search_icd11, fetch_icd11_details, get_z_codes_for_condition
-from langchain_core.messages import HumanMessage
+from client import MCPGeminiClient
 
 st.set_page_config(page_title="Medical Report Analyzer", layout="wide")
+
+# Initialize MCP client
+@st.cache_resource
+def get_mcp_client():
+    """Initialize MCP client with proper URL for Docker environment"""
+    mcp_url = os.getenv("MCP_SERVER_URL", "http://server:8000")
+    return MCPGeminiClient(mcp_url=mcp_url)
+
+# ===== Helper function to call MCP tools =====
+def call_mcp_tool(tool_name: str, arguments: dict):
+    """Call MCP server tool via HTTP"""
+    mcp_url = os.getenv("MCP_SERVER_URL", "http://server:8000")
+    try:
+        response = requests.post(
+            f"{mcp_url}/call-tool",
+            json={"name": tool_name, "arguments": arguments},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()["result"]
+    except Exception as e:
+        st.error(f"MCP tool call failed: {e}")
+        return None
+
+# ===== Entity extraction via MCP =====
+def extract_entities_mcp(report_text: str) -> dict:
+    """Extract medical entities via MCP server"""
+    
+    result = call_mcp_tool("extract_medical_entities", {"report_text": report_text})
+    
+    if not result:
+        st.error("MCP tool returned no result")
+        return {"conditions": [], "procedures": [], "health_factors": []}
+    
+    # Parse the response
+    try:
+        import json
+        if isinstance(result, str):
+            # Parse JSON string
+            data = json.loads(result)
+        else:
+            data = result
+        
+        # Check for error in response
+        if "error" in data:
+            st.error(f"Entity extraction error: {data['error']}")
+            
+        entities = {
+            "conditions": data.get("conditions", []),
+            "procedures": data.get("procedures", []),
+            "health_factors": data.get("health_factors", [])
+        }
+        
+        st.write(f"Extracted entities: {entities}")
+        return entities
+        
+    except Exception as e:
+        st.error(f"Error parsing entity extraction result: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        return {"conditions": [], "procedures": [], "health_factors": []}
+
+# ===== Extract text using MCP =====
+def extract_report_text(file_path: str) -> str:
+    """Extract text from PDF or image via MCP server"""
+    result = call_mcp_tool("extract_report_text", {"file_path": file_path})
+    return result if result else ""
+
+# ===== Search functions using MCP =====
+def search_comorbidities_mcp(condition: str, k: int = 3):
+    """Search comorbidities via MCP"""
+    result = call_mcp_tool("find_comorbidities", {"condition": condition, "top_k": k})
+    if not result or "No comorbidities found" in result:
+        return []
+    
+    comorbidities = []
+    lines = result.split('\n')[1:]  # Skip header
+    for line in lines:
+        if line.strip().startswith('-'):
+            try:
+                match = re.search(r'- (.+?) \(ICD-10: (.+?), Distance: ([\d.]+)\)', line)
+                if match:
+                    comorbidities.append({
+                        'name': match.group(1),
+                        'icd10': match.group(2),
+                        'distance': float(match.group(3))
+                    })
+            except:
+                pass
+    return comorbidities
+
+def search_icd11_mcp(condition: str, limit: int = 3):
+    """Search ICD-11 codes via MCP"""
+    result = call_mcp_tool("find_icd11_codes", {"condition": condition, "limit": limit})
+    if not result or "No ICD-11 codes found" in result:
+        return []
+    
+    codes = []
+    lines = result.split('\n')[1:]  # Skip header
+    for line in lines:
+        if line.strip().startswith('-'):
+            try:
+                match = re.search(r'- (.+?): (.+)', line)
+                if match:
+                    codes.append({
+                        'code': match.group(1),
+                        'title': match.group(2)
+                    })
+            except:
+                pass
+    return codes
+
+def search_cpt_mcp(procedure: str, k: int = 3):
+    """Search CPT codes via MCP"""
+    result = call_mcp_tool("find_cpt_codes", {"procedure": procedure, "top_k": k})
+    if not result or "No CPT codes found" in result:
+        return []
+    
+    codes = []
+    lines = result.split('\n')[1:]  # Skip header
+    for line in lines:
+        if line.strip().startswith('-'):
+            try:
+                match = re.search(r'- (.+?): (.+)', line)
+                if match:
+                    codes.append({
+                        'code': match.group(1),
+                        'description': match.group(2)
+                    })
+            except:
+                pass
+    return codes
+
+def search_z_codes_mcp(health_factor: str, limit: int = 3):
+    """Search Z-codes via MCP"""
+    result = call_mcp_tool("find_z_codes", {"health_factor": health_factor, "limit": limit})
+    if not result or "No Z-codes found" in result:
+        return []
+    
+    codes = []
+    lines = result.split('\n')[1:]  # Skip header
+    for line in lines:
+        if line.strip().startswith('-'):
+            try:
+                match = re.search(r'- (.+?): (.+)', line)
+                if match:
+                    codes.append({
+                        'code': match.group(1),
+                        'title': match.group(2)
+                    })
+            except:
+                pass
+    return codes
+
+# ===== Generate explanations via MCP =====
+def generate_explanation_mcp(entity: str, code: str, description: str, code_type: str) -> str:
+    """Generate explanation for a single code via MCP"""
+    result = call_mcp_tool("generate_explanation", {
+        "entity": entity,
+        "code": code,
+        "description": description,
+        "code_type": code_type
+    })
+    return result if result else f"No explanation available for {code}."
 
 # ===== Cache OCR results =====
 @st.cache_data
@@ -30,113 +191,43 @@ def run_ocr_on_image(image_bytes: bytes) -> Dict:
     image = Image.open(io.BytesIO(image_bytes))
     return pytesseract.image_to_data(image, output_type=Output.DICT, lang='eng')
 
-# ===== Cache ICD-11 details =====
-@lru_cache(maxsize=100)
-def cached_fetch_icd11_details(uri: str) -> Dict:
-    """Cached version of fetch_icd11_details to avoid redundant API calls"""
-    return fetch_icd11_details(uri)
-
-# ===== Batch LLM explanations instead of one-by-one =====
-@st.cache_data(ttl=3600)  # Cache for 1 hour
+# ===== Batch explanations =====
+@st.cache_data(ttl=3600)
 def get_batch_explanations(entities_with_codes: List[Tuple[str, str, str, str]]) -> Dict[str, str]:
-    """
-    Get explanations for multiple codes in a single LLM call
-    entities_with_codes: [(entity, code, description, code_type), ...]
-    Returns: {f"{entity}|{code}": explanation}
-    """
-    if not entities_with_codes:
-        return {}
-    
-    # Build batch prompt
-    prompts = []
-    for i, (entity, code, description, code_type) in enumerate(entities_with_codes, 1):
-        if code_type == 'comorbidity':
-            prompts.append(f"{i}. Why do {entity} and {description} (ICD-10: {code}) commonly co-occur?")
-        elif code_type == 'icd11':
-            prompts.append(f"{i}. Why is ICD-11 code {code} ({description}) used for {entity}?")
-        elif code_type == 'cpt':
-            prompts.append(f"{i}. What does CPT code {code} ({description}) involve for {entity}?")
-        elif code_type == 'z_code':
-            prompts.append(f"{i}. What does Z-code {code} ({description}) represent for {entity}?")
-    
-    batch_prompt = f"""Answer each question in EXACTLY 2-3 concise lines. Number your responses (1., 2., etc.):
+    """Get explanations for multiple codes"""
+    explanations = {}
+    for entity, code, description, code_type in entities_with_codes:
+        key = f"{entity}|{code}"
+        explanations[key] = generate_explanation_mcp(entity, code, description, code_type)
+    return explanations
 
-{chr(10).join(prompts)}"""
-    
-    try:
-        response = llm.invoke([HumanMessage(content=batch_prompt)])
-        content = response.content.strip()
-        
-        # Parse numbered responses
-        explanations = {}
-        lines = content.split('\n')
-        current_num = 0
-        current_text = []
-        
-        for line in lines:
-            match = re.match(r'^(\d+)\.\s*(.+)', line)
-            if match:
-                # Save previous explanation
-                if current_num > 0 and current_text:
-                    entity, code, desc, _ = entities_with_codes[current_num - 1]
-                    key = f"{entity}|{code}"
-                    explanations[key] = ' '.join(current_text).strip()
-                
-                # Start new explanation
-                current_num = int(match.group(1))
-                current_text = [match.group(2)]
-            elif current_num > 0:
-                current_text.append(line.strip())
-        
-        # Save last explanation
-        if current_num > 0 and current_text:
-            entity, code, desc, _ = entities_with_codes[current_num - 1]
-            key = f"{entity}|{code}"
-            explanations[key] = ' '.join(current_text).strip()
-        
-        return explanations
-    except Exception as e:
-        print(f"Batch explanation error: {e}")
-        return {}
-
-# ===== Normalize entities for better matching =====
+# ===== Entity normalization =====
 def normalize_entity(entity: str) -> List[str]:
-    """
-    Split complex entities into simpler searchable terms
-    Returns list of variants to try matching
-    """
+    """Split complex entities into simpler searchable terms"""
     variants = [entity]
     
-    # Remove parentheses content but keep both versions
     if '(' in entity:
         base = re.sub(r'\([^)]*\)', '', entity).strip()
         inside = re.findall(r'\(([^)]*)\)', entity)
         variants.append(base)
         variants.extend(inside)
     
-    # Split on "and" for compound procedures
     if ' and ' in entity.lower():
         parts = re.split(r'\s+and\s+', entity, flags=re.IGNORECASE)
         variants.extend(parts)
     
-    # Handle "history of X" patterns
     if 'history of' in entity.lower():
-        # Try without "history of"
         without_history = re.sub(r'history of\s+', '', entity, flags=re.IGNORECASE).strip()
         variants.append(without_history)
-        # Try just the last significant words
         words = entity.split()
         if len(words) > 3:
-            variants.append(' '.join(words[-2:]))  # last 2 words
+            variants.append(' '.join(words[-2:]))
     
-    # For single-word medical terms, add lowercase variant
     if len(entity.split()) == 1:
         variants.append(entity.lower())
         variants.append(entity.capitalize())
     
-    # Remove extra whitespace and duplicates
     variants = [' '.join(v.split()) for v in variants if v.strip()]
-    
     return list(set(variants))
 
 def convert_pdf_to_image(pdf_path: str) -> Image.Image:
@@ -166,9 +257,6 @@ def find_entity_positions_optimized(entity: str, text_index: Dict, ocr_data: Dic
         if not words:
             continue
         
-        pattern_words = [re.escape(w) for w in words]
-        
-        # Try exact match first
         first_word = words[0].strip('.,;:!?')
         first_word_positions = text_index.get(first_word, [])
         
@@ -176,7 +264,6 @@ def find_entity_positions_optimized(entity: str, text_index: Dict, ocr_data: Dic
             match = True
             matched_length = 0
             
-            # Check if subsequent words match (allowing punctuation)
             for offset, word in enumerate(words):
                 if pos + offset >= len(ocr_data['text']):
                     match = False
@@ -187,11 +274,10 @@ def find_entity_positions_optimized(entity: str, text_index: Dict, ocr_data: Dic
                 
                 if ocr_word == search_word:
                     matched_length += 1
-                elif offset == 0:  # First word must match
+                elif offset == 0:
                     match = False
                     break
             
-            # Accept if we matched at least the core phrase
             if match and matched_length >= len(words):
                 return [pos]
     
@@ -216,8 +302,6 @@ def find_and_highlight(image: Image.Image, ocr_data: Dict, conditions: List[str]
         for entity in entities:
             positions[entity_type][entity] = []
             matched_positions = find_entity_positions_optimized(entity, text_index, ocr_data)
-            
-            # Try matching original entity first
             word_count = len(entity.split())
             
             for start_pos in matched_positions:
@@ -250,20 +334,17 @@ def find_and_highlight(image: Image.Image, ocr_data: Dict, conditions: List[str]
     
     return img_with_highlights, positions
 
-# ===== Collect all codes first, then batch explain =====
+# ===== Fetch all codes via MCP in parallel =====
 def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], health_factors: List[str]) -> Tuple[Dict, List]:
     entity_data = {'conditions': {}, 'procedures': {}, 'health_factors': {}}
-    codes_for_explanation = []  # Collect all codes needing explanation
+    codes_for_explanation = []
     
     def fetch_condition_data(condition):
-        comorbidities = search_comorbidities(condition, k=3)
-        icd11 = search_icd11(condition, limit=3, filter_blocks=True)
+        comorbidities = search_comorbidities_mcp(condition, k=3)
+        icd11 = search_icd11_mcp(condition, limit=3)
         
-        # Collect codes for batch explanation
-        for doc, dist in comorbidities:
-            name = doc.metadata.get("condition", "Unknown")
-            icd10 = doc.metadata.get("icd10", "N/A")
-            codes_for_explanation.append((condition, icd10, name, 'comorbidity'))
+        for item in comorbidities:
+            codes_for_explanation.append((condition, item['icd10'], item['name'], 'comorbidity'))
         
         for item in icd11:
             codes_for_explanation.append((condition, item['code'], item['title'], 'icd11'))
@@ -271,7 +352,7 @@ def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], healt
         return condition, {'comorbidities': comorbidities, 'icd11': icd11}
     
     def fetch_procedure_data(procedure):
-        cpt = search_cpt_codes(procedure, k=3)
+        cpt = search_cpt_mcp(procedure, k=3)
         
         for item in cpt:
             codes_for_explanation.append((procedure, item['code'], item['description'], 'cpt'))
@@ -279,7 +360,7 @@ def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], healt
         return procedure, {'cpt': cpt}
     
     def fetch_health_factor_data(factor):
-        z_codes = get_z_codes_for_condition(factor, limit=3)
+        z_codes = search_z_codes_mcp(factor, limit=3)
         
         for item in z_codes:
             codes_for_explanation.append((factor, item['code'], item['title'], 'z_code'))
@@ -314,6 +395,18 @@ def fetch_all_codes_parallel(conditions: List[str], procedures: List[str], healt
     
     return entity_data, codes_for_explanation
 
+def upload_file_to_mcp(file_bytes, filename):
+    """Upload file to MCP server and get the server-side path"""
+    mcp_url = os.getenv("MCP_SERVER_URL", "http://server:8000")
+    try:
+        files = {"file": (filename, file_bytes)}
+        response = requests.post(f"{mcp_url}/upload", files=files, timeout=30)
+        response.raise_for_status()
+        return response.json()["file_path"]
+    except Exception as e:
+        st.error(f"File upload failed: {e}")
+        return None
+
 def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict, explanations: Dict) -> str:
     highlights = ""
     modals = ""
@@ -338,14 +431,14 @@ def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict, 
                     comorbid_buttons = ""
                     
                     if comorbidities:
-                        for c_idx, (doc, dist) in enumerate(comorbidities):
+                        for c_idx, item in enumerate(comorbidities):
                             cid = f"d{entity_type}{idx}{box_idx}{c_idx}"
-                            name = doc.metadata.get("condition", "Unknown")
-                            icd10 = doc.metadata.get("icd10", "N/A")
+                            name = item.get('name', 'Unknown')
+                            icd10 = item.get('icd10', 'N/A')
+                            distance = item.get('distance', 0)
                             
-                            comorbid_buttons += f'<button class="code-btn" onclick="show(\'{cid}\')">{name}<br><small>Distance: {dist:.3f}</small></button>'
+                            comorbid_buttons += f'<button class="code-btn" onclick="show(\'{cid}\')">{name}<br><small>Distance: {distance:.3f}</small></button>'
                             
-                            # Get explanation from batch
                             explanation = explanations.get(f"{entity}|{icd10}", f"Related comorbidity for {entity}.")
                             
                             detail_modals += f'''<div id="{cid}" class="smd" onclick="hide('{cid}')">
@@ -476,6 +569,7 @@ def create_interactive_html(image_b64: str, positions: Dict, entity_data: Dict, 
                 </div>'''
     
     return f'''<style>
+    
 .rc{{position:relative;display:inline-block;}}
 .ri{{max-width:100%;height:auto;display:block;}}
 .hl{{position:absolute;border:3px solid;cursor:pointer;transition:all 0.2s;}}
@@ -516,93 +610,98 @@ function switchTab(evt, tabId){{
 }}
 </script>'''
 
-st.title("Medical Report Analyzer")
+st.title("🏥 Medical Report Analyzer")
 st.markdown("Upload a medical report (PDF or image) to extract medical entities and retrieve relevant coding information.")
 
 uploaded_file = st.file_uploader("Upload Report", type=['pdf', 'png', 'jpg', 'jpeg'])
 
 if uploaded_file:
-    with st.spinner("Processing report..."):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
-            tmp.write(uploaded_file.read())
-            tmp_path = tmp.name
+    try:
+        with st.spinner("Uploading file to MCP server..."):
+            # Upload file to server
+            mcp_url = os.getenv("MCP_SERVER_URL", "http://server:8000")
+            files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
+            response = requests.post(f"{mcp_url}/upload", files=files, timeout=30)
+            response.raise_for_status()
+            server_file_path = response.json()["file_path"]
+            st.success(f"File uploaded: {server_file_path}")
         
-        try:
-            ext = os.path.splitext(uploaded_file.name)[1].lower()
-            if ext == '.pdf':
-                full_text = extract_text_from_pdf(tmp_path)
-                report_image = convert_pdf_to_image(tmp_path)
-            else:
-                full_text = extract_text_from_image(tmp_path)
-                report_image = Image.open(tmp_path)
+        with st.spinner("Extracting text..."):
+            full_text = extract_report_text(server_file_path)
             
-            with st.spinner("Running OCR..."):
-                buffered = io.BytesIO()
-                report_image.save(buffered, format="PNG")
-                image_bytes = buffered.getvalue()
-                ocr_data = run_ocr_on_image(image_bytes)
-            
-            with st.spinner("Extracting entities..."):
-                state = medical_coding_pipeline.invoke({"patient_report": full_text})
-            
-            conditions = state.get("extracted_conditions", [])
-            procedures = state.get("extracted_procedures", [])
-            health_factors = state.get("extracted_health_factors", [])
-            
-            total_entities = len(conditions) + len(procedures) + len(health_factors)
-            
-            if total_entities == 0:
-                st.warning("No medical entities detected.")
-            else:
-                st.success(f"Detected {total_entities} entities: {len(conditions)} condition(s), {len(procedures)} procedure(s), {len(health_factors)} health factor(s)")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    if conditions:
-                        st.markdown("**🔴 Conditions:**")
-                        for c in conditions:
-                            st.markdown(f"- {c}")
-                with col2:
-                    if procedures:
-                        st.markdown("**🔵 Procedures:**")
-                        for p in procedures:
-                            st.markdown(f"- {p}")
-                with col3:
-                    if health_factors:
-                        st.markdown("**🟢 Health Factors:**")
-                        for h in health_factors:
-                            st.markdown(f"- {h}")
-                
-                with st.spinner("Retrieving medical codes..."):
-                    # Fetch all codes AND collect what needs explanation
-                    entity_data, codes_for_explanation = fetch_all_codes_parallel(conditions, procedures, health_factors)
-                
-                # ===== Single batch LLM call for ALL explanations =====
-                with st.spinner("Generating explanations..."):
-                    explanations = get_batch_explanations(codes_for_explanation)
-                
-                with st.spinner("Highlighting entities..."):
-                    highlighted_img, positions = find_and_highlight(
-                        report_image, ocr_data, conditions, procedures, health_factors
-                    )
-                
-                buffered = io.BytesIO()
-                highlighted_img.save(buffered, format="PNG")
-                img_b64 = base64.b64encode(buffered.getvalue()).decode()
-                
-                html = create_interactive_html(img_b64, positions, entity_data, explanations)
-                
-                st.markdown("### Interactive Medical Report")
-                st.markdown("**Click highlighted entities** to view medical codes. Click code buttons for details.")
-                st.components.v1.html(html, height=1200, scrolling=True)
+            if not full_text or full_text.startswith("Error:"):
+                st.error(f"Text extraction failed: {full_text}")
+                st.stop()
         
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            import traceback
-            st.code(traceback.format_exc())
         
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+        ext = os.path.splitext(uploaded_file.name)[1].lower()
+        if ext == '.pdf':
+            report_image = convert_pdf_to_image(server_file_path)
+        else:
+            report_image = Image.open(server_file_path)
+        
+        with st.spinner("Running OCR..."):
+            buffered = io.BytesIO()
+            report_image.save(buffered, format="PNG")
+            image_bytes = buffered.getvalue()
+            ocr_data = run_ocr_on_image(image_bytes)
+        
+        with st.spinner("Extracting entities via MCP..."):
+            entities = extract_entities_mcp(full_text)
+        
+        conditions = entities.get("conditions", [])
+        procedures = entities.get("procedures", [])
+        health_factors = entities.get("health_factors", [])
+        
+        total_entities = len(conditions) + len(procedures) + len(health_factors)
+        
+        if total_entities == 0:
+            st.warning("No medical entities detected.")
+        else:
+            st.success(f"Detected {total_entities} entities: {len(conditions)} condition(s), {len(procedures)} procedure(s), {len(health_factors)} health factor(s)")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if conditions:
+                    st.markdown("**🔴 Conditions:**")
+                    for c in conditions:
+                        st.markdown(f"- {c}")
+            with col2:
+                if procedures:
+                    st.markdown("**🔵 Procedures:**")
+                    for p in procedures:
+                        st.markdown(f"- {p}")
+            with col3:
+                if health_factors:
+                    st.markdown("**🟢 Health Factors:**")
+                    for h in health_factors:
+                        st.markdown(f"- {h}")
+            
+            with st.spinner("Retrieving medical codes via MCP..."):
+                entity_data, codes_for_explanation = fetch_all_codes_parallel(conditions, procedures, health_factors)
+            
+            with st.spinner("Generating explanations..."):
+                explanations = get_batch_explanations(codes_for_explanation)
+            
+            with st.spinner("Highlighting entities..."):
+                highlighted_img, positions = find_and_highlight(
+                    report_image, ocr_data, conditions, procedures, health_factors
+                )
+            
+            buffered = io.BytesIO()
+            highlighted_img.save(buffered, format="PNG")
+            img_b64 = base64.b64encode(buffered.getvalue()).decode()
+            
+            html = create_interactive_html(img_b64, positions, entity_data, explanations)
+            
+            st.markdown("### Interactive Medical Report")
+            st.markdown("**Click highlighted entities** to view medical codes. Click code buttons for details.")
+            st.components.v1.html(html, height=1200, scrolling=True)
+    
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+
 else:
-    st.info("Upload a medical report to get started")
+    st.info("📄 Upload a medical report to get started")
