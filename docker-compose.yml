@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: medical-mcp-server
+    ports:
+      - "8000:8000"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - medical-network
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: medical-agent
+    ports:
+      - "8501:8501"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MCP_SERVER_URL=http://server:8000
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - medical-network
+
+volumes:
+  uploads:
+    driver: local
+
+networks:
+  medical-network:
+    driver: bridge
