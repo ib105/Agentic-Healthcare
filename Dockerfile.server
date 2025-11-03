@@ -1,0 +1,37 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+# Install system dependencies for OCR and PDF processing
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    libtesseract-dev \
+    poppler-utils \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project files
+COPY pyproject.toml .
+COPY uv.lock* .
+
+# Install dependencies with uv
+RUN uv sync --no-dev
+
+# Copy MCP server and retriever files
+COPY server.py .
+COPY tools.py .
+COPY comorbidity_retriever.py .
+COPY cpt_retriever.py .
+COPY icd11_retriever.py .
+COPY report_loading.py .
+
+# Copy vector databases
+COPY comorbidities_faiss/ ./comorbidities_faiss/
+COPY CPT/ ./CPT/
+
+# Copy environment file
+COPY .env .
+
+EXPOSE 8000
+
+CMD ["uv", "run", "python", "server.py"]
