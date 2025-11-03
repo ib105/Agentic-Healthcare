@@ -1,0 +1,32 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    libtesseract-dev \
+    poppler-utils \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project files
+COPY pyproject.toml .
+COPY uv.lock* .
+
+# Install dependencies with uv
+RUN uv sync --no-dev
+
+# Copy agent files
+COPY client.py .
+COPY main.py .
+COPY app.py .
+COPY report_loading.py .
+
+# Copy environment file
+COPY .env .
+
+EXPOSE 8501
+
+# Run Streamlit app with uv
+CMD ["uv", "run", "streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
