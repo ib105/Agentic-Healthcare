@@ -15,7 +15,6 @@ from cpt_retriever import search_cpt_codes
 from icd11_retriever import search_icd11, get_z_codes_for_condition
 from report_loading import extract_text_from_pdf, extract_text_from_image
 
-# Import LLM for entity extraction and explanations
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel as PydanticBaseModel, Field
@@ -33,7 +32,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize LLM
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0,
@@ -61,7 +59,6 @@ class ToolCall(BaseModel):
     name: str
     arguments: dict
 
-# Tool definitions
 TOOLS = [
     {
         "name": "extract_report_text",
@@ -146,6 +143,30 @@ TOOLS = [
             },
             "required": ["entity", "code", "description", "code_type"]
         }
+    },
+    {
+        "name": "generate_batch_explanations",
+        "description": "Generate explanations for multiple medical codes in a single request (optimized for API quota)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "Array of items to explain",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "entity": {"type": "string", "description": "Medical entity name"},
+                            "code": {"type": "string", "description": "Medical code"},
+                            "description": {"type": "string", "description": "Code description"},
+                            "code_type": {"type": "string", "description": "Type: comorbidity, icd11, cpt, or z_code"}
+                        },
+                        "required": ["entity", "code", "description", "code_type"]
+                    }
+                }
+            },
+            "required": ["items"]
+        }
     }
 ]
 
@@ -181,6 +202,8 @@ def call_tool(tool_call: ToolCall):
             result = find_z_codes(**args)
         elif name == "generate_explanation":
             result = generate_explanation(**args)
+        elif name == "generate_batch_explanations":
+            result = generate_batch_explanations(**args)
         else:
             return JSONResponse({"error": f"Unknown tool: {name}"}, status_code=400)
         
@@ -199,7 +222,7 @@ async def upload_file(file: UploadFile = File(...)):
         uploads_dir = "/app/uploads"
         os.makedirs(uploads_dir, exist_ok=True)
         
-        # Use timestamp to avoid conflicts
+        # Using timestamp to avoid conflicts
         import time
         timestamp = int(time.time() * 1000)
         file_extension = os.path.splitext(file.filename)[1]
@@ -218,7 +241,6 @@ async def upload_file(file: UploadFile = File(...)):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # ===== Tool implementations =====
-
 def extract_report_text(file_path: str) -> str:
     """Extract text from PDF or image file"""
     if not os.path.exists(file_path):
@@ -238,10 +260,6 @@ def extract_report_text(file_path: str) -> str:
 def extract_medical_entities(report_text: str) -> str:
     """Extract medical entities from report text using LLM"""
     try:
-        # Log the input for debugging
-        print(f"Extracting entities from text (length: {len(report_text)})")
-        print(f"First 200 chars: {report_text[:200]}")
-        
         result = entity_extractor.invoke([
             SystemMessage(content="""You are a clinical NLP model that extracts three types of entities from medical reports:
 1. **Conditions**: Diseases, diagnoses, medical conditions (e.g., diabetes, hypertension, fracture)
@@ -258,9 +276,6 @@ Extract all relevant entities from the report. Even if the text seems to be a te
             "procedures": [p.name for p in result.procedures] if result.procedures else [],
             "health_factors": [h.name for h in result.health_status_factors] if result.health_status_factors else []
         }
-        
-        # Log extracted entities
-        print(f"Extracted entities: {entities}")
         
         return json.dumps(entities)
     except Exception as e:
@@ -349,6 +364,124 @@ def generate_explanation(entity: str, code: str, description: str, code_type: st
         return response.content.strip()
     except Exception as e:
         return f"Explanation unavailable: {str(e)}"
+
+def generate_batch_explanations(items: List[dict]) -> str:
+    """
+    Generate explanations for multiple medical codes in a SINGLE Gemini API call.
+    This drastically reduces API quota usage from N calls to 1 call.
+    """
+    try:
+        if not items:
+            return json.dumps({"explanations": []})
+        
+        print(f"Generating batch explanations for {len(items)} items")
+        
+        # Comprehensive prompt for all items
+        prompt = """Generate concise medical explanations (2-3 sentences each) for the following codes. 
+Return your response as a JSON array with objects containing 'entity', 'code', and 'explanation' fields.
+
+Items to explain:
+
+"""
+        
+        for i, item in enumerate(items, 1):
+            entity = item.get('entity', 'Unknown')
+            code = item.get('code', 'N/A')
+            description = item.get('description', 'Unknown')
+            code_type = item.get('code_type', 'unknown')
+            
+            if code_type == 'comorbidity':
+                prompt += f"{i}. Entity: {entity}\n   Code: {code} (ICD-10)\n   Related Condition: {description}\n   Task: Explain why these conditions commonly co-occur.\n\n"
+            elif code_type == 'icd11':
+                prompt += f"{i}. Entity: {entity}\n   Code: {code} (ICD-11)\n   Description: {description}\n   Task: Explain why this diagnostic code is used for this condition.\n\n"
+            elif code_type == 'cpt':
+                prompt += f"{i}. Entity: {entity}\n   Code: {code} (CPT)\n   Procedure: {description}\n   Task: Explain what this procedure involves.\n\n"
+            elif code_type == 'z_code':
+                prompt += f"{i}. Entity: {entity}\n   Code: {code} (Z-code)\n   Description: {description}\n   Task: Explain what this health status code represents.\n\n"
+        
+        prompt += """\nProvide explanations in this exact JSON format:
+{
+  "explanations": [
+    {
+      "entity": "condition/procedure name",
+      "code": "the code",
+      "explanation": "2-3 sentence explanation"
+    }
+  ]
+}"""
+        
+        # Single Gemini API call for all explanations
+        response = llm.invoke([HumanMessage(content=prompt)])
+        response_text = response.content.strip()
+        
+        # Try to extract JSON from response
+        try:
+            # Removing markdown code blocks if present
+            if '```json' in response_text:
+                response_text = response_text.split('```json')[1].split('```')[0].strip()
+            elif '```' in response_text:
+                response_text = response_text.split('```')[1].split('```')[0].strip()
+            
+            result = json.loads(response_text)
+            
+            # Validate structure
+            if 'explanations' not in result:
+                raise ValueError("Response missing 'explanations' field")
+            
+            # Ensure all items have explanations
+            explanations_dict = {f"{exp['entity']}|{exp['code']}": exp for exp in result['explanations']}
+            
+            # Fill in any missing explanations
+            final_explanations = []
+            for item in items:
+                entity = item.get('entity', 'Unknown')
+                code = item.get('code', 'N/A')
+                key = f"{entity}|{code}"
+                
+                if key in explanations_dict:
+                    final_explanations.append(explanations_dict[key])
+                else:
+                    # fallback
+                    final_explanations.append({
+                        "entity": entity,
+                        "code": code,
+                        "explanation": f"This code is associated with {entity}."
+                    })
+            
+            result['explanations'] = final_explanations
+            print(f"Successfully generated {len(final_explanations)} explanations")
+            return json.dumps(result)
+            
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON response: {e}")
+            print(f"Raw response: {response_text[:500]}")
+            
+            # Fallback: Create simple explanations
+            fallback_explanations = []
+            for item in items:
+                fallback_explanations.append({
+                    "entity": item.get('entity', 'Unknown'),
+                    "code": item.get('code', 'N/A'),
+                    "explanation": f"Medical code {item.get('code', 'N/A')} is associated with {item.get('entity', 'this condition')}."
+                })
+            
+            return json.dumps({"explanations": fallback_explanations})
+            
+    except Exception as e:
+        print(f"Error in batch explanation generation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # Return fallback explanations
+        fallback_explanations = []
+        for item in items:
+            fallback_explanations.append({
+                "entity": item.get('entity', 'Unknown'),
+                "code": item.get('code', 'N/A'),
+                "explanation": f"Explanation unavailable for {item.get('code', 'N/A')}."
+            })
+        
+        return json.dumps({"explanations": fallback_explanations})
 
 if __name__ == "__main__":
     print("Starting Medical Coding MCP Server on http://0.0.0.0:8000")
