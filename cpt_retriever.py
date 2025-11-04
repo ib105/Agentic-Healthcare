@@ -1,14 +1,8 @@
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
-# ============================================================
-# Initialize Embedding Function
-# ============================================================
 embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# ============================================================
-# Load FAISS CPT/HCPCS Vector Database
-# ============================================================
 vectorstore = FAISS.load_local(
     "CPT/cpt_faiss",
     embeddings=embedding_function,
@@ -33,7 +27,7 @@ def search_cpt_codes(query: str, k: int = 5):
         print(f"No relevant CPT codes found for query: {query}")
         return []
 
-    # Optional: Clean and format results for readability
+    # Optional: Formating results for readability in this file output
     formatted_results = []
     for doc, score in results_with_scores:
         code = doc.metadata.get("code") if "code" in doc.metadata else "Unknown Code"
