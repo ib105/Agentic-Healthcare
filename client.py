@@ -11,7 +11,7 @@ class MCPGeminiClient:
     """Client for Gemini with MCP tools via HTTP"""
     
     def __init__(self, mcp_url: str = None, model: str = "gemini-2.5-flash"):
-        # Support both local and Docker deployment
+        # Support both local(testing purposes) and Docker deployment
         self.mcp_url = mcp_url or os.getenv("MCP_SERVER_URL", "http://localhost:8000")
         self.model = model
         
@@ -21,7 +21,7 @@ class MCPGeminiClient:
         
         self.genai_client = genai.Client(api_key=api_key)
         
-        # Wait for MCP server to be ready
+        # Waiting for MCP server to be ready
         self._wait_for_server()
     
     def _wait_for_server(self, max_retries=30, delay=2):
@@ -45,7 +45,7 @@ class MCPGeminiClient:
         response = requests.get(f"{self.mcp_url}/tools")
         tools = response.json()
         
-        # Convert MCP tools to Gemini format
+        # Converting MCP tools to Gemini format
         gemini_tools = []
         for tool in tools:
             gemini_tools.append(
@@ -87,14 +87,14 @@ class MCPGeminiClient:
             )
         )
         
-        # Check for function call
+        # Checking for function call
         part = response.candidates[0].content.parts[0]
         fn_call = getattr(part, "function_call", None)
         
         if fn_call:
             tool_name = fn_call.name
             
-            # Extract arguments
+            # Extracting arguments
             args = {}
             if hasattr(fn_call, "args"):
                 args_obj = fn_call.args
@@ -105,10 +105,10 @@ class MCPGeminiClient:
             
             print(f"Calling tool: {tool_name} with args: {args}")
             
-            # Call MCP tool
+            # Calling MCP tool
             tool_result = self.call_mcp_tool(tool_name, args)
             
-            # Send result back to Gemini
+            # Sending result back to Gemini
             followup_contents = [
                 {"role": "user", "parts": [{"text": query}]},
                 {
