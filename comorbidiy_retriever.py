@@ -4,7 +4,7 @@ from langchain_community.vectorstores import FAISS
 # --- Initialize Embedding Function ---
 embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# --- Load FAISS Vector Store (previously saved using save_local("./faiss_db")) ---
+# --- Load FAISS Vector Store ---
 vectorstore = FAISS.load_local(
     "./comorbidities_faiss",
     embeddings=embedding_function,
@@ -22,12 +22,5 @@ def search_comorbidities(query: str, k: int = 3):
     if not results_with_scores:
         print("No relevant comorbidities found.")
         return []
-
-    # Example printout (optional)
-    # for i, (doc, distance) in enumerate(results_with_scores, 1):
-    #     print(f"\n{i}. Condition: {doc.metadata.get('condition', 'Unknown')}")
-    #     print(f"   ICD-10: {doc.metadata.get('icd10', 'N/A')}")
-    #     print(f"   Distance: {distance:.4f}")
-    #     print(f"   Text: {doc.page_content[:200]}...")
 
     return results_with_scores
