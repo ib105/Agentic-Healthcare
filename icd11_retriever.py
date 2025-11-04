@@ -177,7 +177,7 @@ def search_icd11(term: str, limit: int = 5, use_fuzzy: bool = True, filter_block
             "uri": foundation_uri
         })
     
-    # If no results and fuzzy search not used, try again with fuzzy
+    # Fuzzy search
     if not results and not use_fuzzy:
         return search_icd11(term, limit, use_fuzzy=True, filter_blocks=filter_blocks)
     
@@ -326,9 +326,6 @@ def get_z_codes_for_condition(condition: str, limit: int = 3) -> List[Dict]:
     
     return z_codes
 
-# ------------------------------
-# Test function
-# ------------------------------
 if __name__ == "__main__":
     diabetes_results = search_icd11("Diabetes", limit=3)
     for idx, result in enumerate(diabetes_results, 1):
