@@ -75,10 +75,8 @@ print(f"Created {len(docs)} text chunks from {len(combined_df)} comorbid conditi
 # ===========================================================
 embedding_function = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# Build FAISS vector store
 vectorstore = FAISS.from_documents(documents=docs, embedding=embedding_function)
 
-# Persist FAISS index locally
 vectorstore.save_local("./comorbidities_faiss")
 
 print("FAISS vector database built and saved to ./comorbidities_faiss")
