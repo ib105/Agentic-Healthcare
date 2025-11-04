@@ -30,9 +30,6 @@ def safe_llm_invoke(messages, fallback_text="Analysis unavailable due to API lim
             return AIMessage(content=fallback_text)
         raise e
 
-# ============================
-# LLM Setup
-# ============================
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0,
