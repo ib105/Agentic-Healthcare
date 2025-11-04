@@ -618,7 +618,6 @@ uploaded_file = st.file_uploader("Upload Report", type=['pdf', 'png', 'jpg', 'jp
 if uploaded_file:
     try:
         with st.spinner("Uploading file to MCP server..."):
-            # Upload file to server
             mcp_url = os.getenv("MCP_SERVER_URL", "http://server:8000")
             files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
             response = requests.post(f"{mcp_url}/upload", files=files, timeout=30)
