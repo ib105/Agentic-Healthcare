@@ -33,8 +33,8 @@ The system uses a microservices architecture with two Docker containers:
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
-cd <repository-directory>
+git clone [<repository-url>](https://github.com/ib105/Agentic-Healthcare)
+cd Agentic-Healthcare
 ```
 
 ### 2. Configure Environment Variables
@@ -254,14 +254,6 @@ python cpt_data_prep.py
 - Vector databases use `allow_dangerous_deserialization` (only safe in trusted environments)
 - File uploads are isolated in Docker volumes
 
-## License
-
-[Your License Here]
-
-## Contributing
-
-[Contribution guidelines if applicable]
-
 ## Support
 
 For issues and questions:
@@ -271,4 +263,4 @@ For issues and questions:
 
 ---
 
-**Note**: This is a prototype system. For production use, implement additional security measures, error handling, and compliance with healthcare data regulations (HIPAA, GDPR, etc.).
+**Note**: This is a prototype system.
